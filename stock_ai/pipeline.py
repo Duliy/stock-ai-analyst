@@ -98,7 +98,7 @@ def run_cycle(extra_symbols: list[str] | None = None):
         # 反方风控官复审（仅对下单提案）
         adv = llm.advocate(proposal, context)
         if adv["verdict"] == "downgrade":
-            proposal["confidence"] = max(1, proposal.get("confidence", 5) - 2)
+            proposal["confidence"] = max(1, proposal.get("confidence", 5) - 1)
 
         base = {
             "symbol": sym,
