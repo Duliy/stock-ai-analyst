@@ -27,7 +27,16 @@ def _chat(model: str, system: str, user: str, max_tokens: int = 2000) -> str:
             {"role": "user", "content": user},
         ],
     )
-    return resp.choices[0].message.content.strip()
+    msg = resp.choices[0].message
+    text = (msg.content or "").strip()
+    if not text:
+        from . import db
+
+        db.log_event(
+            "alert",
+            f"LLM 返回空内容: model={model} finish={resp.choices[0].finish_reason}，已按保底逻辑处理",
+        )
+    return text
 
 
 def _parse_json(text: str) -> dict:
@@ -56,7 +65,7 @@ def summarize_news(symbol: str, articles: list[dict]) -> dict:
         f"以下是股票 {symbol} 的最新新闻：\n{items}\n\n"
         '请输出 JSON：{"sentiment": -1.0到1.0的数字, "importance": 0到10的整数'
         '（对股价短期影响的重大程度）, "summary": "100字以内中文综合摘要"}',
-        max_tokens=500,
+        max_tokens=3000,
     )
     r = _parse_json(out)
     return {
@@ -66,36 +75,47 @@ def summarize_news(symbol: str, articles: list[dict]) -> dict:
     }
 
 
-# ---------- pro：交易决策 ----------
+# ---------- pro：交易决策（多标的） ----------
 DECIDE_SYSTEM = """你是一名谨慎的美股分析师。基于给定的新闻情绪、技术指标、当前持仓和历史教训，
-输出交易决策。只输出 JSON，不要任何额外文字。格式：
-{"action": "buy"|"sell"|"hold",
- "symbol": "股票代码",
- "position_pct": 0到0.10的数字（buy 时目标仓位占总资产比例）,
- "confidence": 1到10的整数,
- "reasoning": "200字以内中文理由"}
+对 analyses 中的每一只股票给出判断。只输出 JSON，不要任何额外文字。格式：
+{"decisions": [
+  {"symbol": "股票代码",
+   "action": "buy"|"sell"|"hold",
+   "position_pct": 0到0.10的数字（buy 时目标仓位占总资产比例，其他动作填0）,
+   "confidence": 1到10的整数,
+   "reasoning": "80字以内中文理由"}
+]}
 规则：
-- 没把握就 hold，宁缺毋滥
-- buy 只能针对候选名单中的股票
+- analyses 中每只股票都要有一条判断，hold 也要写一句话理由
+- 没把握就 hold，宁缺毋滥；一轮 buy 提案不超过 2 个
+- buy 只能针对 candidates 名单中的股票
 - sell 只能针对当前持仓
 - 必须参考历史教训，避免重复犯错"""
 
 
-def decide(context: dict) -> dict:
+def decide(context: dict) -> list[dict]:
     out = _chat(
         MODELS["pro"],
         DECIDE_SYSTEM,
         json.dumps(context, ensure_ascii=False, indent=1),
-        max_tokens=800,
+        max_tokens=8000,
     )
     r = _parse_json(out)
-    return {
-        "action": r.get("action", "hold"),
-        "symbol": r.get("symbol", ""),
-        "position_pct": float(r.get("position_pct", 0) or 0),
-        "confidence": int(r.get("confidence", 0) or 0),
-        "reasoning": r.get("reasoning", out[:300]),
-    }
+    items = r.get("decisions", [])
+    out_list = []
+    for d in items:
+        if not isinstance(d, dict) or not d.get("symbol"):
+            continue
+        out_list.append(
+            {
+                "symbol": str(d.get("symbol", "")).upper(),
+                "action": d.get("action", "hold"),
+                "position_pct": float(d.get("position_pct", 0) or 0),
+                "confidence": int(d.get("confidence", 0) or 0),
+                "reasoning": d.get("reasoning", ""),
+            }
+        )
+    return out_list
 
 
 # ---------- pro：反方风控官（devil's advocate）----------
@@ -116,7 +136,7 @@ def advocate(proposal: dict, context: dict) -> dict:
         ADVOCATE_SYSTEM,
         f"拟交易提案：\n{json.dumps(proposal, ensure_ascii=False)}\n\n"
         f"决策上下文：\n{json.dumps(context, ensure_ascii=False, indent=1)}",
-        max_tokens=600,
+        max_tokens=4000,
     )
     r = _parse_json(out)
     return {
@@ -138,7 +158,7 @@ def review_trade(trade: dict, context: dict) -> dict:
         REVIEW_SYSTEM,
         f"交易记录：\n{json.dumps(trade, ensure_ascii=False)}\n\n"
         f"相关上下文：\n{json.dumps(context, ensure_ascii=False, indent=1)}",
-        max_tokens=800,
+        max_tokens=4000,
     )
     r = _parse_json(out)
     return {

@@ -71,61 +71,76 @@ def run_cycle(extra_symbols: list[str] | None = None):
             "min_confidence": RISK["min_confidence"],
         },
     }
-    proposal = llm.decide(context)
-
-    if proposal["action"] == "hold" or not proposal["symbol"]:
-        db.record_decision(
-            {
-                "symbol": proposal.get("symbol") or "-",
-                "action": "hold",
-                "confidence": proposal.get("confidence"),
-                "reasoning": proposal.get("reasoning"),
-                "status": "skipped",
-                "context": {"proposal": proposal},
-            }
-        )
+    decisions = llm.decide(context)
+    if not decisions:
+        db.log_event("alert", "pro 模型未返回有效决策列表，本轮跳过")
         return
 
-    # 6. 反方风控官复审（仅对下单提案）
-    adv = llm.advocate(proposal, context)
-    if adv["verdict"] == "downgrade":
-        proposal["confidence"] = max(1, proposal.get("confidence", 5) - 2)
+    # 先卖后买（释放仓位和现金），同方向按置信度降序
+    decisions.sort(key=lambda d: (d["action"] != "sell", -(d.get("confidence") or 0)))
 
-    base = {
-        "symbol": proposal["symbol"],
-        "action": proposal["action"],
-        "confidence": proposal["confidence"],
-        "reasoning": proposal["reasoning"],
-        "advocate": adv,
-        "context": {"proposal": proposal, "analyses": analyses.get(proposal["symbol"])},
-    }
+    pending_msgs = []
+    for proposal in decisions:
+        sym = proposal["symbol"]
+        if proposal["action"] == "hold":
+            db.record_decision(
+                {
+                    "symbol": sym,
+                    "action": "hold",
+                    "confidence": proposal.get("confidence"),
+                    "reasoning": proposal.get("reasoning"),
+                    "status": "skipped",
+                    "context": {"analyses": analyses.get(sym)},
+                }
+            )
+            continue
 
-    # 7. 硬风控闸门
-    if adv["verdict"] == "escalate":
-        did = db.record_decision(
-            {
-                **base,
-                "status": "pending_approval",
-                "gate_reason": "反方风控官有重大异议: " + adv["comment"],
-            }
-        )
+        # 反方风控官复审（仅对下单提案）
+        adv = llm.advocate(proposal, context)
+        if adv["verdict"] == "downgrade":
+            proposal["confidence"] = max(1, proposal.get("confidence", 5) - 2)
+
+        base = {
+            "symbol": sym,
+            "action": proposal["action"],
+            "confidence": proposal["confidence"],
+            "reasoning": proposal["reasoning"],
+            "advocate": adv,
+            "context": {"proposal": proposal, "analyses": analyses.get(sym)},
+        }
+
+        if adv["verdict"] == "escalate":
+            did = db.record_decision(
+                {
+                    **base,
+                    "status": "pending_approval",
+                    "gate_reason": "反方风控官有重大异议: " + adv["comment"],
+                }
+            )
+            pending_msgs.append(
+                f"**#{did} {proposal['action'].upper()} {sym}** 置信度 {proposal['confidence']}/10\n"
+                f"理由：{proposal['reasoning']}\n反方异议：{adv['comment']}"
+            )
+            continue
+
+        ok, gate_reason = risk.gate(proposal, account, positions)
+        if not ok:
+            db.record_decision({**base, "status": "gated", "gate_reason": gate_reason})
+            db.log_event("info", f"提案被风控拦截：{sym} {gate_reason}")
+            continue
+
+        did = db.record_decision({**base, "status": "approved"})
+        result = execution.execute(did)
+        if result.get("ok"):
+            # 成交后刷新账户和持仓，供后续提案的风控判断
+            account = market_data.get_account()
+            positions = market_data.get_positions()
+
+    if pending_msgs:
         notify.send(
             "⏳ 待批准提案",
-            f"**{proposal['action'].upper()} {proposal['symbol']}**\n"
-            f"置信度 {proposal['confidence']}/10\n理由：{proposal['reasoning']}\n"
-            f"反方异议：{adv['comment']}\n请到仪表盘批准或拒绝（#{did}）",
+            "\n\n".join(pending_msgs) + "\n\n请到仪表盘批准或拒绝",
         )
-        return
-
-    ok, gate_reason = risk.gate(proposal, account, positions)
-    if not ok:
-        db.record_decision({**base, "status": "gated", "gate_reason": gate_reason})
-        db.log_event("info", f"提案被风控拦截：{proposal['symbol']} {gate_reason}")
-        return
-
-    # 8. 执行
-    did = db.record_decision({**base, "status": "approved"})
-    execution.execute(did)
 
 
 def run_spike_check():
