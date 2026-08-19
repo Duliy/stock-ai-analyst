@@ -1,7 +1,7 @@
 """决策流水线：每小时一轮的主流程编排。
 
-流程：熔断检查 → 止损扫描 → 对账/复盘 → 新闻(flash) → 指标 → pro 决策
-     → 反方复审 → 硬闸门 → 执行 / 挂起待批准 → 通知
+流程：熔断检查 → 对账/复盘 → 出场引擎（止损/保本/止盈，不走 LLM）
+     → 新闻(flash) → 指标 → pro 决策 → 反方复审 → 硬闸门 → 执行/挂起待批准
 """
 
 from . import db, execution, indicators, llm, market_data, news, notify, risk
@@ -22,23 +22,41 @@ def run_cycle(extra_symbols: list[str] | None = None):
         notify.send("🚨 熔断停机", reason)
         return
 
-    # 2. 持仓硬止损（最高优先级，直接执行，不走 LLM）
-    positions = market_data.get_positions()
-    for p in risk.check_stop_loss(positions):
-        did = db.record_decision(
-            {
-                "symbol": p["symbol"],
-                "action": "sell",
-                "confidence": 10,
-                "reasoning": f"硬止损触发：浮亏 {p['unrealized_plpc']:.1%}",
-                "status": "gated",
-                "context": {"trigger": "stop_loss"},
-            }
-        )
-        execution.execute(did)
-
-    # 3. 对账：新开仓登记 + 已平仓复盘
+    # 2. 对账：新开仓登记 + 已平仓复盘
     execution.sync_trades()
+
+    # 3. 出场引擎（最高优先级，纯规则不走 LLM）：
+    #    初始止损 → +1R 保本 → +2R 卖半 → 吊灯移动止损
+    positions = market_data.get_positions()
+    open_trades = {t["symbol"]: t for t in db.get_open_trades()}
+    for p in positions:
+        t = open_trades.get(p["symbol"])
+        if not t:
+            continue
+        ind = indicators.compute(market_data.get_bars(p["symbol"]))
+        actions, peak, stop = risk.evaluate_exits(p, t, ind.get("atr14"))
+        db.update_trade_state(t["id"], peak=peak, stop=stop)
+        for a in actions:
+            did = db.record_decision(
+                {
+                    "symbol": p["symbol"],
+                    "action": "sell",
+                    "confidence": 10,
+                    "reasoning": a["reason"],
+                    "status": "approved",
+                    "context": {
+                        "trigger": "exit_engine",
+                        "exit_type": a["type"],
+                        "sell_fraction": 0.5 if a["type"] == "sell_half" else 1,
+                    },
+                }
+            )
+            result = execution.execute(did)
+            if result.get("ok") and a["type"] == "sell_half":
+                db.update_trade_state(t["id"], half_sold=True)
+            db.log_event("alert", f"出场引擎：{a['reason']}")
+        if any(a["type"] == "stop_all" for a in actions):
+            open_trades.pop(p["symbol"], None)
 
     # 4. 收集上下文
     account = market_data.get_account()
@@ -123,7 +141,7 @@ def run_cycle(extra_symbols: list[str] | None = None):
             )
             continue
 
-        ok, gate_reason = risk.gate(proposal, account, positions)
+        ok, gate_reason = risk.gate(proposal, account, positions, open_trades)
         if not ok:
             db.record_decision({**base, "status": "gated", "gate_reason": gate_reason})
             db.log_event("info", f"提案被风控拦截：{sym} {gate_reason}")
@@ -132,9 +150,10 @@ def run_cycle(extra_symbols: list[str] | None = None):
         did = db.record_decision({**base, "status": "approved"})
         result = execution.execute(did)
         if result.get("ok"):
-            # 成交后刷新账户和持仓，供后续提案的风控判断
+            # 成交后刷新账户、持仓、交易记录，供后续提案的风控判断
             account = market_data.get_account()
             positions = market_data.get_positions()
+            open_trades = {t["symbol"]: t for t in db.get_open_trades()}
 
     if pending_msgs:
         notify.send(

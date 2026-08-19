@@ -15,6 +15,7 @@ with open(ROOT / "config.yaml", "r", encoding="utf-8") as f:
 MODELS = _cfg["models"]
 WATCHLIST = _cfg["watchlist"]
 RISK = _cfg["risk"]
+STRATEGY = _cfg["strategy"]
 SCHEDULE = _cfg["schedule"]
 NEWS = _cfg["news"]
 STORAGE = _cfg["storage"]

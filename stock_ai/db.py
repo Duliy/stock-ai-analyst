@@ -84,6 +84,11 @@ def db():
 def init_db():
     with db() as conn:
         conn.executescript(SCHEMA)
+        # 老库迁移：补齐 v2 策略列
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(trades)")}
+        for name, ddl in _TRADE_NEW_COLS.items():
+            if name not in cols:
+                conn.execute(f"ALTER TABLE trades ADD COLUMN {ddl}")
 
 
 def log_event(level: str, message: str):
@@ -154,13 +159,76 @@ def record_order(o: dict) -> int:
 
 
 # ---------- trades ----------
-def open_trade(symbol: str, qty: float, entry_price: float) -> int:
+# v2 策略引擎新增列（通过 init_db 里的迁移自动添加）：
+#   atr_entry/stop_price/peak_price/r_per_share/planned_qty/tranches/half_sold
+
+_TRADE_NEW_COLS = {
+    "atr_entry": "atr_entry REAL",
+    "stop_price": "stop_price REAL",
+    "peak_price": "peak_price REAL",
+    "r_per_share": "r_per_share REAL",
+    "planned_qty": "planned_qty REAL",
+    "tranches": "tranches INTEGER DEFAULT 1",
+    "half_sold": "half_sold INTEGER DEFAULT 0",
+}
+
+
+def open_trade(
+    symbol: str,
+    qty: float,
+    entry_price: float,
+    stop: float | None = None,
+    r: float | None = None,
+    planned_qty: float | None = None,
+    atr: float | None = None,
+    tranches: int = 1,
+) -> int:
     with db() as conn:
         cur = conn.execute(
-            "INSERT INTO trades(symbol,qty,entry_price,entry_ts,status) VALUES (?,?,?,?,'open')",
-            (symbol, qty, entry_price, utcnow()),
+            """INSERT INTO trades(symbol,qty,entry_price,entry_ts,status,
+               atr_entry,stop_price,peak_price,r_per_share,planned_qty,tranches)
+               VALUES (?,?,?,?,'open',?,?,?,?,?,?)""",
+            (
+                symbol,
+                qty,
+                entry_price,
+                utcnow(),
+                atr,
+                stop,
+                entry_price,
+                r,
+                planned_qty,
+                tranches,
+            ),
         )
         return cur.lastrowid
+
+
+def update_trade_state(
+    trade_id: int,
+    peak: float | None = None,
+    stop: float | None = None,
+    tranches: int | None = None,
+    half_sold: bool | None = None,
+):
+    sets, args = [], []
+    if peak is not None:
+        sets.append("peak_price=?")
+        args.append(peak)
+    if stop is not None:
+        sets.append("stop_price=?")
+        args.append(stop)
+    if tranches is not None:
+        sets.append("tranches=?")
+        args.append(tranches)
+    if half_sold is not None:
+        sets.append("half_sold=?")
+        args.append(int(half_sold))
+    if not sets:
+        return
+    args.append(trade_id)
+    with db() as conn:
+        conn.execute(f"UPDATE trades SET {', '.join(sets)} WHERE id=?", args)
 
 
 def close_trade(trade_id: int, exit_price: float, review: str, lesson: str):

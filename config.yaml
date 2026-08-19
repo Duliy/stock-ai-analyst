@@ -47,11 +47,24 @@ watchlist:
 risk:
   max_position_pct: 0.10        # 单票仓位 ≤ 总资产 10%
   max_positions: 5              # 总持仓 ≤ 5 只
-  stop_loss_pct: 0.07           # 入场价 -7% 硬止损
+  stop_loss_pct: 0.07           # 止损距离上限（兜底，正常由 2×ATR 决定且更小）
   daily_loss_circuit_pct: 0.03  # 当日浮亏 3% → 当天停止开新仓
   max_consecutive_circuit_days: 3  # 连续 3 天熔断 → 停机待人工
   min_confidence: 6             # AI 置信度 <6/10 不下单
   spike_pct: 0.03               # 持仓 5 分钟内 ±3% 触发异动加轮
+
+# 专业交易策略（Van Tharp 风险百分比模型 + 金字塔加仓 + 吊灯止损）
+# 原则：AI 管方向和置信度，仓位与出场由这里的数学规则决定
+strategy:
+  risk_per_trade_pct: 0.0075    # 单笔风险预算 = 净值 × 0.75%
+  atr_stop_mult: 2.0            # 初始止损距离 = 2 × ATR(14)
+  first_tranche_pct: 0.5        # 首仓只建计划仓位的 1/2
+  pyramid_max_adds: 2           # 最多补仓 2 次
+  pyramid_min_gain_r: 1.0       # 浮盈 ≥1R 才允许补仓（只加赢家，永不摊平）
+  breakeven_after_r: 1.0        # 浮盈 ≥1R 后止损上移至成本价（保本）
+  take_profit_r: 2.0            # 浮盈 ≥2R 卖出一半锁定利润
+  chandelier_mult: 2.5          # 移动止损 = 持仓期最高价 - 2.5×ATR（只上移）
+  max_portfolio_heat_pct: 0.03  # 组合总敞口风险 ≤ 净值 3%
 
 # 运行节奏
 schedule:
