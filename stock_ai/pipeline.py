@@ -5,7 +5,7 @@
 """
 
 from . import db, execution, indicators, llm, market_data, news, notify, risk
-from .config import RISK, WATCHLIST
+from .config import FINNHUB_API_KEY, NEWS, RISK, STRATEGY, WATCHLIST
 
 
 def run_cycle(extra_symbols: list[str] | None = None):
@@ -65,13 +65,49 @@ def run_cycle(extra_symbols: list[str] | None = None):
     position_symbols = {p["symbol"] for p in positions}
     symbols = sorted(set(WATCHLIST["core"] + (extra_symbols or [])) | position_symbols)
 
+    # 3.5 全局环境检查（逻辑见 README 策略节）
+    # a. 大盘 regime：SPY 跌破日线 50 均线 → 禁止一切买入（做多胜率与大盘强相关）
+    spy_ind = indicators.compute(market_data.get_daily_bars("SPY", 120))
+    market_weak = not spy_ind.get("above_sma50", True)
+    if market_weak:
+        db.log_event(
+            "alert", f"大盘弱势：SPY ${spy_ind.get('price')} < 50日均线，本轮禁止开新仓"
+        )
+    # b. 尾盘禁开仓：收盘前买入=立即暴露隔夜跳空且止损隔夜不生效
+    clock = market_data.trading().get_clock()
+    mins_to_close = (clock.next_close - clock.timestamp).total_seconds() / 60
+    near_close = mins_to_close < STRATEGY["no_entry_before_close_min"]
+    no_new_buys = market_weak or near_close
+
+    # 4. 逐股分析：新闻（带时效标注 + 摘要缓存）+ 技术指标
+    import hashlib
+    import json as _json
+    from datetime import datetime, timezone
+
+    cache_ttl = NEWS.get("cache_ttl_hours", 2) * 3600
     analyses = {}
     for sym in symbols:
         articles = news.get_news(sym)
-        news_summary = llm.summarize_news(sym, articles)
+        art_hash = hashlib.sha1(
+            "|".join(str(a.get("id")) for a in articles).encode()
+        ).hexdigest()
+        cached = db.get_news_cache(sym)
+        cache_age = (
+            (
+                datetime.now(timezone.utc) - datetime.fromisoformat(cached["ts"])
+            ).total_seconds()
+            if cached
+            else 1e18
+        )
+        if cached and cached["articles_hash"] == art_hash and cache_age < cache_ttl:
+            news_summary = _json.loads(cached["summary_json"])  # 输入未变 → 复用摘要
+        else:
+            news_summary = llm.summarize_news(sym, articles)
+            db.set_news_cache(sym, art_hash, news_summary)
         ind = indicators.compute(market_data.get_bars(sym))
         analyses[sym] = {
             "news": news_summary,
+            "news_freshness_min": min((a["age_min"] for a in articles), default=None),
             "indicators": ind,
             "held": sym in position_symbols,
         }
@@ -83,6 +119,7 @@ def run_cycle(extra_symbols: list[str] | None = None):
         "candidates": WATCHLIST["core"],
         "analyses": analyses,
         "lessons": db.get_lessons(limit=10),
+        "market_regime": "weak(SPY<50日线)" if market_weak else "normal",
         "constraints": {
             "max_position_pct": RISK["max_position_pct"],
             "max_positions": RISK["max_positions"],
@@ -140,6 +177,41 @@ def run_cycle(extra_symbols: list[str] | None = None):
                 f"理由：{proposal['reasoning']}\n反方异议：{adv['comment']}"
             )
             continue
+
+        # 全局禁买窗口：大盘弱势 / 临近收盘（卖出与止损永远允许）
+        if proposal["action"] == "buy" and no_new_buys:
+            why = (
+                "大盘弱势（SPY<50日均线）"
+                if market_weak
+                else f"距收盘仅 {mins_to_close:.0f} 分钟"
+            )
+            db.record_decision(
+                {**base, "status": "gated", "gate_reason": f"禁买窗口：{why}"}
+            )
+            db.log_event("info", f"禁买窗口拦截：{sym}（{why}）")
+            continue
+
+        # 财报黑洞：财报是二元跳空事件，止损单会在 gap 中失效（需 Finnhub key）
+        if (
+            proposal["action"] == "buy"
+            and FINNHUB_API_KEY
+            and not any(p["symbol"] == sym for p in positions)
+        ):
+            earn = news.get_earnings_calendar(sym)
+            if earn and earn.get("date"):
+                from datetime import date
+
+                days_to = (date.fromisoformat(earn["date"]) - date.today()).days
+                if 0 <= days_to <= STRATEGY["earnings_blackout_days"]:
+                    db.record_decision(
+                        {
+                            **base,
+                            "status": "gated",
+                            "gate_reason": f"财报黑洞：{days_to} 天后（{earn['date']}）发布财报",
+                        }
+                    )
+                    db.log_event("info", f"财报黑洞拦截：{sym} {earn['date']} 发财报")
+                    continue
 
         ok, gate_reason = risk.gate(proposal, account, positions, open_trades)
         if not ok:

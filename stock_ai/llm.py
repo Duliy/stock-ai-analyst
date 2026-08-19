@@ -56,15 +56,17 @@ def summarize_news(symbol: str, articles: list[dict]) -> dict:
     if not articles:
         return {"sentiment": 0, "importance": 0, "summary": "无相关新闻"}
     items = "\n".join(
-        f"[{i + 1}] {a['headline']} — {a.get('summary', '')[:200]}"
+        f"[{i + 1}]（{a.get('age_min', 0) // 60}小时{a.get('age_min', 0) % 60}分钟前）{a['headline']} — {a.get('summary', '')[:200]}"
         for i, a in enumerate(articles)
     )
     out = _chat(
         MODELS["flash"],
         "你是财经新闻分析助手。只输出 JSON，不要任何额外文字。",
-        f"以下是股票 {symbol} 的最新新闻：\n{items}\n\n"
+        f"以下是股票 {symbol} 的最新新闻（已标注发布时间）：\n{items}\n\n"
         '请输出 JSON：{"sentiment": -1.0到1.0的数字, "importance": 0到10的整数'
-        '（对股价短期影响的重大程度）, "summary": "100字以内中文综合摘要"}',
+        '（对股价短期影响的重大程度）, "summary": "100字以内中文综合摘要"}\n'
+        "时效性规则：新闻的定价影响力随时间快速衰减——1小时内的新闻权重最高，"
+        "超过6小时的显著降权，超过12小时的仅作背景参考。",
         max_tokens=3000,
     )
     r = _parse_json(out)

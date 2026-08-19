@@ -99,6 +99,25 @@ def latest_price(symbol: str) -> float | None:
         return None
 
 
+def get_daily_bars(symbol: str, days: int = 120) -> pd.DataFrame:
+    """日线 K线（大盘 regime 判断用）。"""
+    req = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=TimeFrame.Day,
+        start=datetime.now(timezone.utc) - timedelta(days=days),
+    )
+    df = data().get_stock_bars(req).df
+    if df.empty:
+        return df
+    if isinstance(df.index, pd.MultiIndex):
+        df = (
+            df.xs(symbol, level="symbol")
+            if symbol in df.index.get_level_values("symbol")
+            else df
+        )
+    return df.sort_index()
+
+
 def five_min_change(symbol: str) -> float:
     """最近 5 分钟涨跌幅（异动检测用）。数据不足返回 0。"""
     req = StockBarsRequest(

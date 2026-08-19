@@ -100,6 +100,25 @@ def evaluate_exits(
             stop,
         )
 
+    # 时间止损（Minervini 原则：好的入场会很快见效；死仓位占坑占风险预算）
+    from datetime import datetime, timezone
+
+    age_days = (
+        datetime.now(timezone.utc) - datetime.fromisoformat(trade["entry_ts"])
+    ).total_seconds() / 86400
+    gain_r = (price - entry) / r
+    if age_days >= S["time_stop_days"] and gain_r < S["time_stop_min_r"]:
+        return (
+            [
+                {
+                    "type": "stop_all",
+                    "reason": f"时间止损：持仓 {age_days:.1f} 天浮盈仅 {gain_r:+.2f}R（<{S['time_stop_min_r']}R），资金效率过低离场",
+                }
+            ],
+            peak,
+            stop,
+        )
+
     return [], peak, stop
 
 
@@ -169,6 +188,18 @@ def gate(
                     False,
                     f"组合总风险 {heat:.1%}+{S['risk_per_trade_pct']:.1%} 超上限 {S['max_portfolio_heat_pct']:.0%}",
                 )
+            # 板块集中度：相关性风险不体现在个股止损上，必须在组合层限制
+            sectors = S.get("sectors", {})
+            my_sector = sectors.get(symbol)
+            if my_sector:
+                same = sum(
+                    1 for p in positions if sectors.get(p["symbol"]) == my_sector
+                )
+                if same >= S["max_per_sector"]:
+                    return (
+                        False,
+                        f"{my_sector}板块持仓已达 {S['max_per_sector']} 只上限（相关性风险）",
+                    )
             if account["cash"] < 200:
                 return False, "现金不足"
 

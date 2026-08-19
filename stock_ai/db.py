@@ -63,6 +63,12 @@ CREATE TABLE IF NOT EXISTS equity_snapshots (
     equity REAL NOT NULL,
     cash REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS news_cache (
+    symbol TEXT PRIMARY KEY,
+    articles_hash TEXT NOT NULL,
+    summary_json TEXT NOT NULL,
+    ts TEXT NOT NULL
+);
 """
 
 
@@ -324,6 +330,23 @@ def record_equity_snapshot(equity: float, cash: float):
         conn.execute(
             "INSERT INTO equity_snapshots(ts, equity, cash) VALUES (?,?,?)",
             (utcnow(), equity, cash),
+        )
+
+
+# ---------- 新闻摘要缓存 ----------
+def get_news_cache(symbol: str) -> dict | None:
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM news_cache WHERE symbol=?", (symbol,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_news_cache(symbol: str, articles_hash: str, summary: dict):
+    with db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO news_cache(symbol, articles_hash, summary_json, ts) VALUES (?,?,?,?)",
+            (symbol, articles_hash, json.dumps(summary, ensure_ascii=False), utcnow()),
         )
 
 

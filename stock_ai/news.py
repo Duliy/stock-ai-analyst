@@ -26,16 +26,25 @@ def get_news(symbol: str) -> list[dict]:
     )
     try:
         news = _client().get_news(req)
-        return [
-            {
-                "headline": n.headline,
-                "summary": n.summary or "",
-                "source": n.source,
-                "created_at": str(n.created_at),
-                "url": n.url,
-            }
-            for n in news.data.get("news", [])
-        ]
+        now = datetime.now(timezone.utc)
+        out = []
+        for n in news.data.get("news", []):
+            created = n.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age_min = int((now - created).total_seconds() / 60)
+            out.append(
+                {
+                    "id": n.id,
+                    "headline": n.headline,
+                    "summary": n.summary or "",
+                    "source": n.source,
+                    "created_at": str(n.created_at),
+                    "age_min": age_min,  # 新闻年龄（分钟），时效性核心字段
+                    "url": n.url,
+                }
+            )
+        return out
     except Exception:
         return []
 

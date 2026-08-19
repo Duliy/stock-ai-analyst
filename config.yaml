@@ -65,6 +65,23 @@ strategy:
   take_profit_r: 2.0            # 浮盈 ≥2R 卖出一半锁定利润
   chandelier_mult: 2.5          # 移动止损 = 持仓期最高价 - 2.5×ATR（只上移）
   max_portfolio_heat_pct: 0.03  # 组合总敞口风险 ≤ 净值 3%
+  regime_sma_days: 50           # 大盘过滤：SPY 跌破日线 N 均线禁止买入
+  no_entry_before_close_min: 30 # 收盘前 N 分钟禁止开新仓（卖出不限）
+  time_stop_days: 4             # 持仓 N 天浮盈仍不足 → 时间止损
+  time_stop_min_r: 0.5          # 时间止损阈值：浮盈 <0.5R
+  max_per_sector: 3             # 同板块持仓上限（相关性风险控制）
+  earnings_blackout_days: 3     # 财报前 N 天禁开新仓（需 Finnhub key）
+  sectors:                      # 板块映射（用于集中度控制）
+    AAPL: 科技
+    MSFT: 科技
+    NVDA: 科技
+    GOOGL: 科技
+    META: 科技
+    AVGO: 科技
+    AMD: 科技
+    NFLX: 科技
+    AMZN: 消费
+    JPM: 金融
 
 # 运行节奏
 schedule:
@@ -76,6 +93,7 @@ schedule:
 news:
   lookback_hours: 12            # 每轮拉取最近 12 小时新闻
   max_articles_per_symbol: 5    # 每只股票最多喂给 flash 的条数
+  cache_ttl_hours: 2            # 新闻摘要缓存：同批文章不重复调 flash，超期重评（让时效衰减生效）
 
 # 存储（相对项目根目录）
 storage:
