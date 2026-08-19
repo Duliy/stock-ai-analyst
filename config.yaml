@@ -1,0 +1,70 @@
+# ============================================================
+# 美股 AI 分析师 - 主配置（密钥不在这里，在 .env）
+# ============================================================
+
+models:
+  base_url: "https://hyper.charm.land/v1"   # charmland OpenAI 兼容端点
+  flash: "deepseek-v4-flash-0731"           # 新闻摘要/初筛（便宜）
+  pro: "deepseek-v4-pro-0813"               # 决策/反方复审/复盘（强）
+  temperature: 0.2
+
+# 交易标的（方案 A：固定精选名单）
+watchlist:
+  core:    # 核心持仓候选，最多 10 只
+    - AAPL
+    - MSFT
+    - NVDA
+    - GOOGL
+    - AMZN
+    - META
+    - AVGO
+    - AMD
+    - NFLX
+    - JPM
+  observe: # 观察名单，约 20 只
+    - PLTR
+    - CRM
+    - ORCL
+    - ADBE
+    - QCOM
+    - INTC
+    - MU
+    - TXN
+    - UBER
+    - SHOP
+    - SQ
+    - COIN
+    - SNOW
+    - DDOG
+    - NET
+    - CRWD
+    - PANW
+    - V
+    - MA
+    - COST
+
+# 硬风控（AI 无权豁免）
+risk:
+  max_position_pct: 0.10        # 单票仓位 ≤ 总资产 10%
+  max_positions: 5              # 总持仓 ≤ 5 只
+  stop_loss_pct: 0.07           # 入场价 -7% 硬止损
+  daily_loss_circuit_pct: 0.03  # 当日浮亏 3% → 当天停止开新仓
+  max_consecutive_circuit_days: 3  # 连续 3 天熔断 → 停机待人工
+  min_confidence: 6             # AI 置信度 <6/10 不下单
+  spike_pct: 0.03               # 持仓 5 分钟内 ±3% 触发异动加轮
+
+# 运行节奏
+schedule:
+  market_timezone: "America/New_York"
+  bar_timeframe: "15Min"        # K线粒度
+  lookback_days: 60             # 技术指标回看天数
+
+# 数据
+news:
+  lookback_hours: 12            # 每轮拉取最近 12 小时新闻
+  max_articles_per_symbol: 5    # 每只股票最多喂给 flash 的条数
+
+# 存储（相对项目根目录）
+storage:
+  db_path: "data/stock_ai.db"
+  report_dir: "data/reports"
