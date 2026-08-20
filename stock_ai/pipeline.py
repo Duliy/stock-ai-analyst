@@ -51,7 +51,12 @@ def run_cycle(extra_symbols: list[str] | None = None):
                     },
                 }
             )
-            result = execution.execute(did)
+            try:
+                result = execution.execute(did)
+            except Exception as e:
+                db.set_decision_status(did, "skipped", f"执行异常: {e}")
+                db.log_event("alert", f"出场执行异常 {p['symbol']}: {e}")
+                continue
             if result.get("ok") and a["type"] == "sell_half":
                 db.update_trade_state(t["id"], half_sold=True)
             db.log_event("alert", f"出场引擎：{a['reason']}")

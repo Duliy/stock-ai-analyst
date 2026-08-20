@@ -17,10 +17,25 @@ from stock_ai.config import require_keys
 
 if __name__ == "__main__":
     require_keys()
-    if "--spike" in sys.argv:
-        pipeline.run_spike_check()
-    elif "--report" in sys.argv:
-        path = pipeline.daily_report()
-        print(f"日报已生成: {path}")
-    else:
-        pipeline.run_cycle()
+    import time
+
+    attempts = 2  # 网络偶发 SSL 重置（GFW 干扰），失败后等 60s 重试一次
+    for i in range(attempts):
+        try:
+            if "--spike" in sys.argv:
+                pipeline.run_spike_check()
+            elif "--report" in sys.argv:
+                path = pipeline.daily_report()
+                print(f"日报已生成: {path}")
+            else:
+                pipeline.run_cycle()
+            break
+        except Exception as e:
+            from stock_ai import db
+
+            db.init_db()
+            db.log_event("alert", f"本轮执行异常中断: {type(e).__name__}: {e}")
+            if i < attempts - 1:
+                time.sleep(60)
+            else:
+                raise SystemExit(1)

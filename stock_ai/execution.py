@@ -86,8 +86,15 @@ def execute(decision_id: int) -> dict:
             db.set_decision_status(decision_id, "skipped", "无持仓可卖")
             return {"ok": False, "error": "无持仓可卖"}
         fraction = ctx.get("sell_fraction", 1)
-        qty = pos["qty"] if fraction >= 1 else round(pos["qty"] * fraction, 4)
-        order = _submit(d["symbol"], OrderSide.SELL, qty=qty)
+        if fraction >= 1:
+            # 全平仓用 close_position：连零股灰尘一起清，避免残留仓位阻塞对账
+            order = market_data.trading().close_position(d["symbol"])
+        else:
+            # 部分卖出向下取整到 4 位小数，防止超出实际持仓被 Alpaca 拒单
+            import math
+
+            qty = math.floor(pos["qty"] * fraction * 10000) / 10000
+            order = _submit(d["symbol"], OrderSide.SELL, qty=qty)
 
     db.record_order(
         {
@@ -162,27 +169,35 @@ def sync_trades():
             _register_trade(sym, p["qty"], p["avg_entry_price"])
             db.log_event("info", f"登记开仓 {sym} @ {p['avg_entry_price']}")
 
-    # 平仓检测 + LLM 复盘
+    # 平仓检测 + LLM 复盘（灰尘仓 < $1 视为已平仓，先清尘再结账）
     for sym, t in open_trades.items():
-        if sym not in positions:
-            exit_price = market_data.latest_price(sym) or t["entry_price"]
-            review = llm.review_trade(
-                {
-                    "symbol": sym,
-                    "qty": t["qty"],
-                    "entry_price": t["entry_price"],
-                    "exit_price": exit_price,
-                    "return_pct": round(
-                        (exit_price - t["entry_price"]) / t["entry_price"], 4
-                    ),
-                    "entry_ts": t["entry_ts"],
-                    "stop_price": t["stop_price"],
-                    "half_sold": bool(t["half_sold"]),
-                },
-                {"lessons_used": db.get_lessons(sym, limit=5)},
-            )
-            db.close_trade(t["id"], exit_price, review["review"], review["lesson"])
-            db.log_event(
-                "info",
-                f"{sym} 平仓，回报率 {(exit_price - t['entry_price']) / t['entry_price']:.2%}，教训：{review['lesson']}",
-            )
+        pos = positions.get(sym)
+        if pos is not None and pos["market_value"] >= 1:
+            continue
+        if pos is not None:  # 灰尘仓：清掉零股再按平仓处理
+            try:
+                market_data.trading().close_position(sym)
+                db.log_event("info", f"{sym} 清理灰尘仓 {pos['qty']} 股")
+            except Exception as e:
+                db.log_event("alert", f"{sym} 灰尘仓清理失败: {e}")
+        exit_price = market_data.latest_price(sym) or t["entry_price"]
+        review = llm.review_trade(
+            {
+                "symbol": sym,
+                "qty": t["qty"],
+                "entry_price": t["entry_price"],
+                "exit_price": exit_price,
+                "return_pct": round(
+                    (exit_price - t["entry_price"]) / t["entry_price"], 4
+                ),
+                "entry_ts": t["entry_ts"],
+                "stop_price": t["stop_price"],
+                "half_sold": bool(t["half_sold"]),
+            },
+            {"lessons_used": db.get_lessons(sym, limit=5)},
+        )
+        db.close_trade(t["id"], exit_price, review["review"], review["lesson"])
+        db.log_event(
+            "info",
+            f"{sym} 平仓，回报率 {(exit_price - t['entry_price']) / t['entry_price']:.2%}，教训：{review['lesson']}",
+        )
